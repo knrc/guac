@@ -24,11 +24,39 @@ import (
 	"github.com/vektah/gqlparser/v2/gqlerror"
 
 	"github.com/guacsec/guac/internal/testing/ptrfrom"
+	"github.com/guacsec/guac/pkg/assembler/backends/inmem/helpers"
 	"github.com/guacsec/guac/pkg/assembler/graphql/model"
 )
 
 // Internal data: link between packages and vulnerabilities (certifyVulnerability)
-type certifyVulnerabilityList []*certifyVulnerabilityLink
+type certifyVulnerabilitySet struct{ helpers.SparseSet[uint32] }
+
+type certifyVulnerabilityAttributeIndex uint32
+
+const (
+	certVuln_packageId = certifyVulnerabilityAttributeIndex(iota)
+	certVuln_vulnerabilityID
+	certVuln_timeScanned
+	certVuln_dbURI
+	certVuln_dbVersion
+	certVuln_scannerURI
+	certVuln_scannerVersion
+	certVuln_origin
+	certVuln_collector
+)
+
+var certVulnIDs = []certifyVulnerabilityAttributeIndex{
+	certVuln_packageId,
+	certVuln_vulnerabilityID,
+	certVuln_timeScanned,
+	certVuln_dbURI,
+	certVuln_dbVersion,
+	certVuln_scannerURI,
+	certVuln_scannerVersion,
+	certVuln_origin,
+	certVuln_collector,
+}
+
 type certifyVulnerabilityLink struct {
 	id              uint32
 	packageID       uint32
@@ -89,9 +117,9 @@ func (c *demoClient) ingestVulnerability(ctx context.Context, packageArg model.P
 	if err != nil {
 		return nil, gqlerror.Errorf("%v ::  %s", funcName, err)
 	}
-	packageVulns := foundPackage.certifyVulnLinks
-
-	var vulnerabilityLinks []uint32
+	// Create the sparse set here for now, ideally this would come from the discovered package/vulnerability
+	var packageVulns certifyVulnerabilitySet
+	packageVulns.InsertAll(foundPackage.certifyVulnLinks...)
 
 	vulnID, err := getVulnerabilityIDFromInput(c, vulnerability)
 	if err != nil {
@@ -101,38 +129,34 @@ func (c *demoClient) ingestVulnerability(ctx context.Context, packageArg model.P
 	if err != nil {
 		return nil, gqlerror.Errorf("%v ::  %s", funcName, err)
 	}
-	vulnerabilityLinks = foundVulnNode.certifyVulnLinks
+	// Create the sparse set here for now, ideally this would come from the discovered package/vulnerability
+	var vulnerabilityLinks certifyVulnerabilitySet
+	vulnerabilityLinks.InsertAll(foundVulnNode.certifyVulnLinks...)
 
-	var searchIDs []uint32
-	if len(packageVulns) < len(vulnerabilityLinks) {
-		searchIDs = packageVulns
+	// Create the sparse set here for now, ideally this would come from the discovered package/vulnerability
+	searchIDs := new(certifyVulnerabilitySet)
+	searchIDs.Intersection(&packageVulns.SparseSet, &vulnerabilityLinks.SparseSet)
+
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_packageId, packageID))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_vulnerabilityID, vulnID))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_timeScanned, certifyVuln.TimeScanned))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_dbURI, certifyVuln.DbURI))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_dbVersion, certifyVuln.DbVersion))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_scannerURI, certifyVuln.ScannerURI))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_scannerVersion, certifyVuln.ScannerVersion))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_origin, certifyVuln.Origin))
+	searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_collector, certifyVuln.Collector))
+
+	var collectedCertifyVulnLink *certifyVulnerabilityLink
+
+	if !searchIDs.IsEmpty() {
+		if err = searchIDs.ForEach(func(val uint32) error {
+			collectedCertifyVulnLink, err = byID[*certifyVulnerabilityLink](val, c)
+			return err
+		}); err != nil {
+			return nil, err
+		}
 	} else {
-		searchIDs = vulnerabilityLinks
-	}
-
-	// Don't insert duplicates
-	duplicate := false
-	collectedCertifyVulnLink := certifyVulnerabilityLink{}
-	for _, id := range searchIDs {
-		v, err := byID[*certifyVulnerabilityLink](id, c)
-		if err != nil {
-			return nil, gqlerror.Errorf("%v ::  %s", funcName, err)
-		}
-		vulnMatch := false
-		if vulnID != 0 && vulnID == v.vulnerabilityID {
-			vulnMatch = true
-		}
-		if vulnMatch && packageID == v.packageID && certifyVuln.TimeScanned.Equal(v.timeScanned) && certifyVuln.DbURI == v.dbURI &&
-			certifyVuln.DbVersion == v.dbVersion && certifyVuln.ScannerURI == v.scannerURI && certifyVuln.ScannerVersion == v.scannerVersion &&
-			certifyVuln.Origin == v.origin && certifyVuln.Collector == v.collector {
-
-			collectedCertifyVulnLink = *v
-			duplicate = true
-			break
-		}
-	}
-
-	if !duplicate {
 		if readOnly {
 			c.m.RUnlock()
 			cv, err := c.ingestVulnerability(ctx, packageArg, vulnerability, certifyVuln, false)
@@ -140,7 +164,7 @@ func (c *demoClient) ingestVulnerability(ctx context.Context, packageArg model.P
 			return cv, err
 		}
 		// store the link
-		collectedCertifyVulnLink = certifyVulnerabilityLink{
+		collectedCertifyVulnLink = &certifyVulnerabilityLink{
 			id:              c.getNextID(),
 			packageID:       packageID,
 			vulnerabilityID: vulnID,
@@ -152,8 +176,20 @@ func (c *demoClient) ingestVulnerability(ctx context.Context, packageArg model.P
 			origin:          certifyVuln.Origin,
 			collector:       certifyVuln.Collector,
 		}
-		c.index[collectedCertifyVulnLink.id] = &collectedCertifyVulnLink
-		c.certifyVulnerabilities = append(c.certifyVulnerabilities, &collectedCertifyVulnLink)
+		c.index[collectedCertifyVulnLink.id] = collectedCertifyVulnLink
+		c.certifyVulnerabilities.Insert(collectedCertifyVulnLink.id)
+
+		c.createCertifyVulnerabilityAttributeSet(certVuln_packageId, packageID).Insert(collectedCertifyVulnLink.id)
+
+		c.createCertifyVulnerabilityAttributeSet(certVuln_vulnerabilityID, vulnID).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_timeScanned, certifyVuln.TimeScanned).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_dbURI, certifyVuln.DbURI).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_dbVersion, certifyVuln.DbVersion).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_scannerURI, certifyVuln.ScannerURI).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_scannerVersion, certifyVuln.ScannerVersion).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_origin, certifyVuln.Origin).Insert(collectedCertifyVulnLink.id)
+		c.createCertifyVulnerabilityAttributeSet(certVuln_collector, certifyVuln.Collector).Insert(collectedCertifyVulnLink.id)
+
 		// set the backlinks
 		foundPackage.setVulnerabilityLinks(collectedCertifyVulnLink.id)
 		if vulnID != 0 {
@@ -162,7 +198,7 @@ func (c *demoClient) ingestVulnerability(ctx context.Context, packageArg model.P
 	}
 
 	// build return GraphQL type
-	builtCertifyVuln, err := c.buildCertifyVulnerability(&collectedCertifyVulnLink, nil, true)
+	builtCertifyVuln, err := c.buildCertifyVulnerability(collectedCertifyVulnLink, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -194,19 +230,17 @@ func (c *demoClient) CertifyVuln(ctx context.Context, filter *model.CertifyVulnS
 		return []*model.CertifyVuln{foundCertifyVuln}, nil
 	}
 
-	var search []uint32
-	foundOne := false
+	searchIDs := new(certifyVulnerabilitySet)
 	if filter != nil && filter.Package != nil {
 		pkgs, err := c.findPackageVersion(filter.Package)
 		if err != nil {
 			return nil, gqlerror.Errorf("%v :: %v", funcName, err)
 		}
-		foundOne = len(pkgs) > 0
 		for _, pkg := range pkgs {
-			search = append(search, pkg.certifyVulnLinks...)
+			searchIDs.InsertAll(pkg.certifyVulnLinks...)
 		}
 	}
-	if !foundOne && filter != nil && filter.Vulnerability != nil &&
+	if searchIDs.IsEmpty() && filter != nil && filter.Vulnerability != nil &&
 		filter.Vulnerability.NoVuln != nil && *filter.Vulnerability.NoVuln {
 
 		exactVuln, err := c.exactVulnerability(&model.VulnerabilitySpec{
@@ -217,10 +251,9 @@ func (c *demoClient) CertifyVuln(ctx context.Context, filter *model.CertifyVulnS
 			return nil, gqlerror.Errorf("%v :: %v", funcName, err)
 		}
 		if exactVuln != nil {
-			search = append(search, exactVuln.certifyVulnLinks...)
-			foundOne = true
+			searchIDs.InsertAll(exactVuln.certifyVulnLinks...)
 		}
-	} else if !foundOne && filter != nil && filter.Vulnerability != nil {
+	} else if searchIDs.IsEmpty() && filter != nil && filter.Vulnerability != nil {
 
 		if filter.Vulnerability.NoVuln != nil && !*filter.Vulnerability.NoVuln {
 			if filter.Vulnerability.Type != nil && *filter.Vulnerability.Type == noVulnType {
@@ -233,69 +266,38 @@ func (c *demoClient) CertifyVuln(ctx context.Context, filter *model.CertifyVulnS
 			return nil, gqlerror.Errorf("%v :: %v", funcName, err)
 		}
 		if exactVuln != nil {
-			search = append(search, exactVuln.certifyVulnLinks...)
-			foundOne = true
+			searchIDs.InsertAll(exactVuln.certifyVulnLinks...)
 		}
 	}
 
 	var out []*model.CertifyVuln
-	if foundOne {
-		for _, id := range search {
-			link, err := byID[*certifyVulnerabilityLink](id, c)
-			if err != nil {
-				return nil, gqlerror.Errorf("%v :: %v", funcName, err)
-			}
-			out, err = c.addCVIfMatch(out, filter, link)
-			if err != nil {
-				return nil, gqlerror.Errorf("%v :: %v", funcName, err)
-			}
-		}
-	} else {
-		for _, link := range c.certifyVulnerabilities {
-			var err error
-			out, err = c.addCVIfMatch(out, filter, link)
-			if err != nil {
-				return nil, gqlerror.Errorf("%v :: %v", funcName, err)
-			}
-		}
+	if searchIDs.IsEmpty() {
+		searchIDs.Copy(&c.certifyVulnerabilities.SparseSet)
 	}
 
+	if filter != nil {
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_timeScanned, filter.TimeScanned))
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_dbURI, filter.DbURI))
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_dbVersion, filter.DbVersion))
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_scannerURI, filter.ScannerURI))
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_scannerVersion, filter.ScannerVersion))
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_origin, filter.Origin))
+		searchIDs.IntersectionWith(c.getCertifyVulnerabilityAttributeSet(certVuln_collector, filter.Collector))
+	}
+
+	searchIDs.ForEach(func(val uint32) error {
+		link := c.index[val].(*certifyVulnerabilityLink)
+		foundCertifyVuln, err := c.buildCertifyVulnerability(link, filter, false)
+		if err != nil {
+			return err
+		}
+		if foundCertifyVuln == nil || reflect.ValueOf(foundCertifyVuln.Vulnerability).IsNil() {
+			return nil
+		}
+		out = append(out, foundCertifyVuln)
+		return nil
+	})
 	return out, nil
-}
-
-func (c *demoClient) addCVIfMatch(out []*model.CertifyVuln,
-	filter *model.CertifyVulnSpec,
-	link *certifyVulnerabilityLink) ([]*model.CertifyVuln, error) {
-	if filter != nil && filter.TimeScanned != nil && !filter.TimeScanned.Equal(link.timeScanned) {
-		return out, nil
-	}
-	if filter != nil && noMatch(filter.DbURI, link.dbURI) {
-		return out, nil
-	}
-	if filter != nil && noMatch(filter.DbVersion, link.dbVersion) {
-		return out, nil
-	}
-	if filter != nil && noMatch(filter.ScannerURI, link.scannerURI) {
-		return out, nil
-	}
-	if filter != nil && noMatch(filter.ScannerVersion, link.scannerVersion) {
-		return out, nil
-	}
-	if filter != nil && noMatch(filter.Collector, link.collector) {
-		return out, nil
-	}
-	if filter != nil && noMatch(filter.Origin, link.origin) {
-		return out, nil
-	}
-
-	foundCertifyVuln, err := c.buildCertifyVulnerability(link, filter, false)
-	if err != nil {
-		return nil, err
-	}
-	if foundCertifyVuln == nil || reflect.ValueOf(foundCertifyVuln.Vulnerability).IsNil() {
-		return out, nil
-	}
-	return append(out, foundCertifyVuln), nil
 }
 
 func (c *demoClient) buildCertifyVulnerability(link *certifyVulnerabilityLink, filter *model.CertifyVulnSpec, ingestOrIDProvided bool) (*model.CertifyVuln, error) {
@@ -369,4 +371,30 @@ func (c *demoClient) buildCertifyVulnerability(link *certifyVulnerabilityLink, f
 		Metadata:      metadata,
 	}
 	return &certifyVuln, nil
+}
+
+func newCertifyVulnerabilityAttributes() map[certifyVulnerabilityAttributeIndex]map[any]*certifyVulnerabilitySet {
+	attrMap := make(map[certifyVulnerabilityAttributeIndex]map[any]*certifyVulnerabilitySet)
+	for _, id := range certVulnIDs {
+		attrMap[id] = make(map[any]*certifyVulnerabilitySet)
+	}
+	return attrMap
+}
+
+func (c *demoClient) createCertifyVulnerabilityAttributeSet(index certifyVulnerabilityAttributeIndex, id any) *certifyVulnerabilitySet {
+	indexMap := c.certifyVulnerabilityAttributes[index]
+	idSet := indexMap[id]
+	if idSet == nil {
+		idSet = new(certifyVulnerabilitySet)
+		indexMap[id] = idSet
+	}
+	return idSet
+}
+
+func (c *demoClient) getCertifyVulnerabilityAttributeSet(index certifyVulnerabilityAttributeIndex, id any) *helpers.SparseSet[uint32] {
+	idSet := c.certifyVulnerabilityAttributes[index][id]
+	if idSet != nil {
+		return &idSet.SparseSet
+	}
+	return nil
 }

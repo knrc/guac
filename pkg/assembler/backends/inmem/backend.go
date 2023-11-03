@@ -89,23 +89,24 @@ type demoClient struct {
 	sources         srcTypeMap
 	vulnerabilities vulnTypeMap
 
-	certifyBads            badList
-	certifyGoods           goodList
-	certifyLegals          certifyLegalList
-	certifyVulnerabilities certifyVulnerabilityList
-	hasMetadatas           hasMetadataList
-	hasSBOMs               hasSBOMList
-	hasSLSAs               hasSLSAList
-	hasSources             hasSrcList
-	hashEquals             hashEqualList
-	isDependencies         isDependencyList
-	occurrences            isOccurrenceList
-	pkgEquals              pkgEqualList
-	pointOfContacts        pointOfContactList
-	scorecards             scorecardList
-	vexs                   vexList
-	vulnerabilityEquals    vulnerabilityEqualList
-	vulnerabilityMetadatas vulnerabilityMetadataList
+	certifyBads                    badList
+	certifyGoods                   goodList
+	certifyLegals                  certifyLegalList
+	certifyVulnerabilities         certifyVulnerabilitySet
+	certifyVulnerabilityAttributes map[certifyVulnerabilityAttributeIndex]map[any]*certifyVulnerabilitySet
+	hasMetadatas                   hasMetadataList
+	hasSBOMs                       hasSBOMList
+	hasSLSAs                       hasSLSAList
+	hasSources                     hasSrcList
+	hashEquals                     hashEqualList
+	isDependencies                 isDependencyList
+	occurrences                    isOccurrenceList
+	pkgEquals                      pkgEqualList
+	pointOfContacts                pointOfContactList
+	scorecards                     scorecardList
+	vexs                           vexList
+	vulnerabilityEquals            vulnerabilityEqualList
+	vulnerabilityMetadatas         vulnerabilityMetadataList
 }
 
 func getBackend(_ context.Context, _ backends.BackendArgs) (backends.Backend, error) {
@@ -117,6 +118,8 @@ func getBackend(_ context.Context, _ backends.BackendArgs) (backends.Backend, er
 		packages:        pkgTypeMap{},
 		sources:         srcTypeMap{},
 		vulnerabilities: vulnTypeMap{},
+
+		certifyVulnerabilityAttributes: newCertifyVulnerabilityAttributes(),
 	}
 
 	return client, nil
